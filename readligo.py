@@ -1,11 +1,13 @@
 """
 readligo.py
-Version 0.2
-April 21, 2016
-Jonah Kanner, Roy Williams, and Alan Weinstein
+
+
+Version 0.6
+Mar 3, 2021
+Jonah Kanner, Roy Williams, Agata Trovato, and Alan Weinstein
 
 Updates in this version:
- * Should now work with both Python 2 and Python 3
+ * Update so that frame files are read w/ gwpy instead of FR library
 
 This module provides tools for reading LIGO data
 files.  Data along with supporting documentation
@@ -18,6 +20,10 @@ Example #0:
 To load all data from a single file:
 strain, time, dq = rl.loaddata('ligo_data/H-H1_LOSC_4_V1-842653696-4096.hdf5', 'H1')
 
+Some GWF files require parameters to name the strain, DQ, and hardware injection channgel:
+strain, time, dq = rl.loaddata('H-H1_LOSC_16_V1-1127415808-4096.gwf', 'H1', strain_chan='H1:GWOSC-16KHZ_R1_STRAIN', 
+                                dq_chan='H1:GWOSC-16KHZ_R1_DQMASK', inj_chan='H1:GWOSC-16KHZ_R1_INJMASK')
+
 Example #1: 
 segList = getsegs(842657792, 842658792, 'H1')
 for (start, stop) in segList:
@@ -27,7 +33,7 @@ for (start, stop) in segList:
 
 This default configuration assumes that the needed LIGO data 
 files are available in the current working directory or a 
-subdirectory.  LIGO data between the input GPS times is loaded
+subdirectory.  LIGO data between the input GPS times are loaded
 into STRAIN.  META is a dictionary of gps start, gps stop, and the 
 sample time.  DQ is a dictionary of data quality flags.
 
@@ -69,45 +75,62 @@ import numpy as np
 import os
 import fnmatch
 
-def read_frame(filename, ifo, readstrain=True):
+def read_frame(filename, ifo, readstrain=True, strain_chan=None, dq_chan=None, inj_chan=None):
     """
     Helper function to read frame files
     """
-    try:
-        import Fr
-    except:
-        from pylal import Fr
+
+    from gwpy.timeseries import TimeSeries
+
 
     if ifo is None:
         raise TypeError("""To read GWF data, ifo must be 'H1', 'H2', or 'L1'.
         def loaddata(filename, ifo=None):""")
 
     #-- Read strain channel
-    strain_name = ifo + ':LOSC-STRAIN'
+    if strain_chan is None:
+        strain_chan = ifo + ':LOSC-STRAIN'
+    
     if readstrain:
-        sd = Fr.frgetvect(filename, strain_name)    
-        strain = sd[0]
-        gpsStart = sd[1] 
-        ts = sd[3][0]
+        try:
+            sd = TimeSeries.read(filename, strain_chan)
+            strain = sd.value
+            gpsStart = sd.t0.value
+            ts = sd.dt.value
+        except:
+            print(("ERROR reading file {0} with strain channel {1}".format(filename, strain_chan)))
+            raise
     else:
         ts = 1
         strain = 0
     
     #-- Read DQ channel
-    dq_name = ifo + ':LOSC-DQMASK'
-    qd = Fr.frgetvect(filename, dq_name)
-    gpsStart = qd[1]
-    qmask = np.array(qd[0])
-    dq_ts = qd[3][0]
-    shortnameList_wbit = qd[5].split()
-    shortnameList = [name.split(':')[1] for name in shortnameList_wbit]
+    if dq_chan is None:
+        dq_chan = ifo + ':LOSC-DQMASK'
+
+    try:
+        qd = TimeSeries.read(str(filename), str(dq_chan))
+        gpsStart = qd.t0.value
+        qmask = np.array(qd.value)
+        dq_ts = qd.dt.value
+        shortnameList_wbit = str(qd.unit).split()
+        shortnameList = [name.split(':')[1] for name in shortnameList_wbit]
+    except:
+        print(("ERROR reading DQ channel '{0}' from file: {1}".format(dq_chan, filename)))
+        raise
 
     #-- Read Injection channel
-    inj_name = ifo + ':LOSC-INJMASK'
-    injdata = Fr.frgetvect(filename, inj_name)
-    injmask = injdata[0]
-    injnamelist_bit = injdata[5].split()
-    injnamelist     = [name.split(':')[1] for name in injnamelist_bit]
+    if inj_chan is None:
+        inj_chan = ifo + ':LOSC-INJMASK'
+    
+    try:
+        injdata = TimeSeries.read(str(filename), str(inj_chan))
+        injmask = injdata.value
+        injnamelist_bit = str(injdata.unit).split()
+        injnamelist     = [name.split(':')[1] for name in injnamelist_bit]
+    except:
+        print(("ERROR reading injection channel '{0}' from file: {1}".format(inj_chan, filename)))
+        raise
 
     return strain, gpsStart, ts, qmask, shortnameList, injmask, injnamelist
     
@@ -129,23 +152,23 @@ def read_hdf5(filename, readstrain=True):
     #-- Read the DQ information
     dqInfo = dataFile['quality']['simple']
     qmask = dqInfo['DQmask'][...]
-    shortnameArray = dqInfo['DQShortnames'].value
+    shortnameArray = dqInfo['DQShortnames'][()]
     shortnameList  = list(shortnameArray)
     
     # -- Read the INJ information
     injInfo = dataFile['quality/injections']
     injmask = injInfo['Injmask'][...]
-    injnameArray = injInfo['InjShortnames'].value
+    injnameArray = injInfo['InjShortnames'][()]
     injnameList  = list(injnameArray)
     
     #-- Read the meta data
     meta = dataFile['meta']
-    gpsStart = meta['GPSstart'].value    
+    gpsStart = meta['GPSstart'][()]    
     
     dataFile.close()
     return strain, gpsStart, ts, qmask, shortnameList, injmask, injnameList
 
-def loaddata(filename, ifo=None, tvec=True, readstrain=True):
+def loaddata(filename, ifo=None, tvec=True, readstrain=True, strain_chan=None, dq_chan=None, inj_chan=None):
     """
     The input filename should be a LOSC .hdf5 file or a LOSC .gwf
     file.  The file type will be determined from the extenstion.  
@@ -159,15 +182,21 @@ def loaddata(filename, ifo=None, tvec=True, readstrain=True):
          unless the flag tvec=False.  In that case, TIME is a
          dictionary of meta values.
     CHANNEL_DICT is a dictionary of data quality channels    
+    STRAIN_CHAN is the channel name of the strain vector in GWF files.
+    DQ_CHAN is the channel name of the data quality vector in GWF files.
+    INJ_CHAN is the channel name of the injection vector in GWF files.
     """
 
     # -- Check for zero length file
-    if os.stat(filename).st_size == 0:
-        return None, None, None
+    try:
+        if os.stat(filename).st_size == 0:
+            return None, None, None
+    except:
+        return None,None,None
 
     file_ext = os.path.splitext(filename)[1]    
     if (file_ext.upper() == '.GWF'):
-        strain, gpsStart, ts, qmask, shortnameList, injmask, injnameList = read_frame(filename, ifo, readstrain)
+        strain, gpsStart, ts, qmask, shortnameList, injmask, injnameList = read_frame(filename, ifo, readstrain, strain_chan, dq_chan, inj_chan)
     else:
         strain, gpsStart, ts, qmask, shortnameList, injmask, injnameList = read_hdf5(filename, readstrain)
         
@@ -220,7 +249,7 @@ def dq2segs(channel, gps_start):
     Returns of a list of segment GPS start and stop times.
     """
     #-- Check if the user input a dictionary
-    if type(channel) == dict:
+    if isinstance(channel, dict):
         try:
             channel = channel['DEFAULT']
         except:
@@ -252,7 +281,7 @@ def dq_channel_to_seglist(channel, fs=4096):
     strain and time outputs of LOADDATA.
     """
     #-- Check if the user input a dictionary
-    if type(channel) == dict:
+    if isinstance(channel, dict):
         try:
             channel = channel['DEFAULT']
         except:
@@ -272,7 +301,7 @@ def dq_channel_to_seglist(channel, fs=4096):
         boundaries = np.append(boundaries,len(condition))
 
     # -- group the segment boundaries two by two
-    segments = boundaries.reshape((len(boundaries)/2,2))
+    segments = boundaries.reshape( ( len(boundaries) // 2, 2 ) ) #// for python 3
     # -- Account for sampling frequency and return a slice
     segment_list = [slice(start*fs, stop*fs) for (start,stop) in segments]
     
@@ -296,7 +325,7 @@ class FileList():
             else:
                 directory='.'
 
-        print("Using data directory {0} ...".format(directory))
+        print(("Using data directory {0} ...".format(directory)))
         self.directory = directory
         self.cache = cache
         if cache is None:
@@ -329,17 +358,20 @@ class FileList():
         start_gps = gps - (gps % 4096)
         filenamelist = fnmatch.filter(self.list, '*' + '-' + ifo + '*' + '-' + str(start_gps) + '-' + '*')
         if len(filenamelist) == 0:
-            print("WARNING!  No file found for GPS {0} and IFO {1}".format(gps, ifo))
+            print(("WARNING!  No file found for GPS {0} and IFO {1}".format(gps, ifo)))
             return None
         else:
             return filenamelist[0]
             
-def getstrain(start, stop, ifo, filelist=None):
+def getstrain(start, stop, ifo, filelist=None, strain_chan=None, dq_chan=None, inj_chan=None):
     """
     START should be the starting gps time of the data to be loaded.
     STOP  should be the end gps time of the data to be loaded.
     IFO should be 'H1', 'H2', or 'L1'.
     FILELIST is an optional argument that is a FileList() instance.
+    STRAIN_CHAN is the channel name of the strain vector in GWF files.
+    DQ_CHAN is the channel name of the data quality vector in GWF files.
+    INJ_CHAN is the channel name of the injection vector in GWF files.
 
     The return value is (strain, meta, dq)
     
@@ -353,7 +385,7 @@ def getstrain(start, stop, ifo, filelist=None):
         filelist = FileList()
 
     # -- Check if this is a science segment
-    segList = getsegs(start, stop, ifo, flag='DATA', filelist=filelist)
+    segList = getsegs(start, stop, ifo, flag='DATA', filelist=filelist, strain_chan=strain_chan, dq_chan=dq_chan, inj_chan=inj_chan)
     sl = segList.seglist
     if (sl[0][0] == start) and (sl[0][1] == stop):
         pass
@@ -374,10 +406,10 @@ def getstrain(start, stop, ifo, filelist=None):
     # -- Loop over needed files
     for time in gpsList:
         filename = filelist.findfile(time, ifo)
-        print("Loading {0}".format(filename))
+        print(("Loading {0}".format(filename)))
 
         #-- Read in data
-        strain, meta, dq = loaddata(filename, ifo, tvec=False)
+        strain, meta, dq = loaddata(filename, ifo, tvec=False, strain_chan=strain_chan, dq_chan=dq_chan, inj_chan=inj_chan)
         if len(m_strain) == 0:
             m_start = meta['start']
             dt = meta['dt']
@@ -386,16 +418,16 @@ def getstrain(start, stop, ifo, filelist=None):
         if m_dq is None:
             m_dq = dq
         else:
-            for key in dq.keys():
+            for key in list(dq.keys()):
                 m_dq[key] = np.append(m_dq[key], dq[key])
 
     # -- Trim the data
     lndx  = np.abs(start - m_start)*(1.0/dt)
     rndx = np.abs(stop - m_start)*(1.0/dt)
-        
-    m_strain = m_strain[lndx:rndx]
-    for key in m_dq.keys():
-        m_dq[key] = m_dq[key][lndx*dt:rndx*dt]
+
+    m_strain = m_strain[int(lndx):int(rndx)] # slice indices must be integers
+    for key in list(m_dq.keys()):
+        m_dq[key] = m_dq[key][int(lndx*dt):int(rndx*dt)]# slice indices must be integers
 
     meta['start'] = start
     meta['stop']  = stop
@@ -406,15 +438,21 @@ def getstrain(start, stop, ifo, filelist=None):
 class SegmentList():
     def __init__(self, filename, numcolumns=3):
 
-        if type(filename) is str:
-            if numcolumns == 4:
-                number, start, stop, duration = np.loadtxt(filename, dtype='int',unpack=True)
-            elif numcolumns == 2:
-                start, stop = np.loadtxt(filename, dtype='int',unpack=True)
-            elif numcolumns == 3:
-                start, stop, duration = np.loadtxt(filename, dtype='int',unpack=True)
-            self.seglist = zip(start, stop)
-        elif type(filename) is list:
+        if isinstance(filename, str):
+            try:
+                if numcolumns == 4:
+                    number, start, stop, duration = np.loadtxt(filename, dtype='int',unpack=True)
+                elif numcolumns == 2:
+                    start, stop = np.loadtxt(filename, dtype='int',unpack=True)
+                elif numcolumns == 3:
+                    start, stop, duration = np.loadtxt(filename, dtype='int',unpack=True)
+                if np.isscalar(start): 
+                    self.seglist = [[start, stop]]
+                else:
+                    self.seglist = list(zip(start, stop))
+            except:
+                self.seglist = []
+        elif isinstance(filename, list):
             self.seglist = filename
         else:
             raise TypeError("SegmentList() expects the name of a segmentlist file from the LOSC website Timeline")
@@ -426,7 +464,7 @@ class SegmentList():
     def __getitem__(self, key):
         return self.seglist[key]
        
-def getsegs(start, stop, ifo, flag='DATA', filelist=None):
+def getsegs(start, stop, ifo, flag='DATA', filelist=None, strain_chan=None, dq_chan=None, inj_chan=None):
     """
     Method for constructing a segment list from 
     LOSC data files.  By default, the method uses
@@ -436,6 +474,12 @@ def getsegs(start, stop, ifo, flag='DATA', filelist=None):
     If a FileList is passed in the flag FILELIST,
     then those files will be searched for segments
     passing the DQ flag passed as the FLAG argument.
+
+    START is the start time GPS
+    STOP is the stop time GPS
+    STRAIN_CHAN is the channel name of the strain vector in GWF files.
+    DQ_CHAN is the channel name of the data quality vector in GWF files.
+    INJ_CHAN is the channel name of the injection vector in GWF files.
     """
 
     if filelist is None:
@@ -455,19 +499,17 @@ def getsegs(start, stop, ifo, flag='DATA', filelist=None):
 
         #-- Read in data
         if filename is None:
-            print("WARNING! No file found with GPS start time {0}".format(time))
-            print("Segment list may contain errors due to missing files.")
+            print(("WARNING! No file found with GPS start time {0}".format(time)))
             continue
         else:
             try:
-                strain, meta, dq = loaddata(filename, ifo, tvec=False, readstrain=False)     
+                strain, meta, dq = loaddata(filename, ifo, tvec=False, readstrain=False, strain_chan=strain_chan, dq_chan=dq_chan, inj_chan=inj_chan)     
             except:
-                print("WARNING! Failed to load file {0}".format(filename))
-                print("Segment list may contain errors due to corrupt files.")
+                print(("WARNING! Failed to load file {0}".format(filename)))
                 continue
 
         if dq is None:
-            print("Warning! Found zero length file {0}".format(filename))
+            print(("Warning! Found zero length file {0}".format(filename)))
             print("Segment list may contain errors.")
             continue
 
@@ -510,5 +552,3 @@ def getsegs(start, stop, ifo, flag='DATA', filelist=None):
     segList = [seg for seg in segList if seg is not None]
 
     return SegmentList(segList)
-
-
